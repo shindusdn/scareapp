@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Webcam Mirror</title>
+  <title>Webcam Mirror + Face Landmarks</title>
   <style>
     :root { color-scheme: dark; }
     * { box-sizing: border-box; }
@@ -26,7 +26,7 @@
       background: #000;
       border-radius: 8px;
     }
-    #controls { display: flex; gap: 12px; align-items: center; }
+    #controls { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; justify-content: center; }
     button {
       padding: 8px 16px;
       font-size: 1rem;
@@ -36,6 +36,8 @@
       color: #fff;
       cursor: pointer;
     }
+    button:disabled { background: #444; cursor: not-allowed; }
+    label { display: flex; gap: 6px; align-items: center; font-size: 0.9rem; }
     #status { font-size: 0.9rem; opacity: 0.8; }
   </style>
 </head>
@@ -43,38 +45,99 @@
   <canvas id="output"></canvas>
 
   <div id="controls">
-    <button id="toggle">Start camera</button>
-    <span id="status">Press the button (or "q" to stop)</span>
+    <button id="toggle" disabled>Start camera</button>
+    <label><input type="checkbox" id="showMesh" checked /> Show landmarks</label>
+    <span id="status">Loading face model...</span>
   </div>
 
   <!-- Hidden source video; we draw it onto the canvas, mirrored -->
   <video id="input" playsinline muted style="display:none"></video>
 
-  <script>
+  <script type="module">
+    import {
+      FaceLandmarker,
+      FilesetResolver,
+      DrawingUtils,
+    } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14";
+
+    const VISION_WASM = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm";
+    const MODEL_URL =
+      "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task";
+
     const video = document.getElementById("input");
     const canvas = document.getElementById("output");
     const ctx = canvas.getContext("2d");
     const toggleBtn = document.getElementById("toggle");
     const statusEl = document.getElementById("status");
+    const showMeshEl = document.getElementById("showMesh");
 
     let stream = null;
     let rafId = null;
+    let faceLandmarker = null;
+    let drawingUtils = null;
+    let lastVideoTime = -1;
+    let lastResult = null;
 
-    /**
-     * Called every frame AFTER the mirrored video has been drawn.
-     * This is where MediaPipe face landmarks will go later.
-     *
-     * Landmarks come back as normalized coords (0..1) from the UNmirrored video,
-     * so convert them with mirrorX() / toY() before drawing:
-     *   ctx.fillRect(mirrorX(lm.x), toY(lm.y), 3, 3);
-     */
-    function onFrame(video, ctx, timestampMs) {
-      // TODO: run MediaPipe FaceLandmarker here and draw results.
+    // ---------- Load MediaPipe model ----------
+    async function initFaceLandmarker() {
+      const fileset = await FilesetResolver.forVisionTasks(VISION_WASM);
+      const makeOptions = (delegate) => ({
+        baseOptions: { modelAssetPath: MODEL_URL, delegate },
+        runningMode: "VIDEO",
+        numFaces: 1,
+      });
+      try {
+        faceLandmarker = await FaceLandmarker.createFromOptions(fileset, makeOptions("GPU"));
+      } catch (e) {
+        console.warn("GPU delegate failed, falling back to CPU", e);
+        faceLandmarker = await FaceLandmarker.createFromOptions(fileset, makeOptions("CPU"));
+      }
+      drawingUtils = new DrawingUtils(ctx);
     }
 
-    const mirrorX = (nx) => (1 - nx) * canvas.width;
-    const toY = (ny) => ny * canvas.height;
+    // ---------- Per-frame hook (runs after the mirrored video is drawn) ----------
+    function onFrame(video, ctx, timestampMs) {
+      if (!faceLandmarker) return;
 
+      // Only run detection when the video has a new frame
+      if (video.currentTime !== lastVideoTime) {
+        lastVideoTime = video.currentTime;
+        lastResult = faceLandmarker.detectForVideo(video, timestampMs);
+      }
+
+      if (!showMeshEl.checked || !lastResult || !lastResult.faceLandmarks) return;
+
+      // Landmarks are in UNmirrored coords, so apply the same mirror transform
+      // used for the video. Anything drawn inside this block lines up with the image.
+      ctx.save();
+      ctx.translate(canvas.width, 0);
+      ctx.scale(-1, 1);
+
+      for (const landmarks of lastResult.faceLandmarks) {
+        drawingUtils.drawConnectors(landmarks, FaceLandmarker.FACE_LANDMARKS_TESSELATION,
+          { color: "#C0C0C070", lineWidth: 1 });
+        drawingUtils.drawConnectors(landmarks, FaceLandmarker.FACE_LANDMARKS_FACE_OVAL,
+          { color: "#E0E0E0", lineWidth: 2 });
+        drawingUtils.drawConnectors(landmarks, FaceLandmarker.FACE_LANDMARKS_RIGHT_EYE,
+          { color: "#FF3030", lineWidth: 2 });
+        drawingUtils.drawConnectors(landmarks, FaceLandmarker.FACE_LANDMARKS_LEFT_EYE,
+          { color: "#30FF30", lineWidth: 2 });
+        drawingUtils.drawConnectors(landmarks, FaceLandmarker.FACE_LANDMARKS_RIGHT_EYEBROW,
+          { color: "#FF3030", lineWidth: 2 });
+        drawingUtils.drawConnectors(landmarks, FaceLandmarker.FACE_LANDMARKS_LEFT_EYEBROW,
+          { color: "#30FF30", lineWidth: 2 });
+        drawingUtils.drawConnectors(landmarks, FaceLandmarker.FACE_LANDMARKS_LIPS,
+          { color: "#FF69B4", lineWidth: 2 });
+        drawingUtils.drawConnectors(landmarks, FaceLandmarker.FACE_LANDMARKS_RIGHT_IRIS,
+          { color: "#FF3030", lineWidth: 2 });
+        drawingUtils.drawConnectors(landmarks, FaceLandmarker.FACE_LANDMARKS_LEFT_IRIS,
+          { color: "#30FF30", lineWidth: 2 });
+      }
+
+      ctx.restore();
+    }
+
+    // ---------- Render loop ----------
     function render(now) {
       // Draw the video flipped horizontally (mirror)
       ctx.save();
@@ -99,6 +162,8 @@
 
         canvas.width = video.videoWidth;
         canvas.height = video.videoHeight;
+        lastVideoTime = -1;
+        lastResult = null;
 
         toggleBtn.textContent = "Stop camera";
         statusEl.textContent = `Running ${canvas.width}x${canvas.height} (press "q" to stop)`;
@@ -118,13 +183,24 @@
       video.srcObject = null;
       ctx.clearRect(0, 0, canvas.width, canvas.height);
       toggleBtn.textContent = "Start camera";
-      statusEl.textContent = 'Stopped. Press the button to start again.';
+      statusEl.textContent = "Stopped. Press the button to start again.";
     }
 
     toggleBtn.addEventListener("click", () => (stream ? stop() : start()));
     window.addEventListener("keydown", (e) => {
       if (e.key.toLowerCase() === "q" && stream) stop();
     });
+
+    // ---------- Boot ----------
+    initFaceLandmarker()
+      .then(() => {
+        toggleBtn.disabled = false;
+        statusEl.textContent = 'Model ready. Press "Start camera".';
+      })
+      .catch((err) => {
+        console.error(err);
+        statusEl.textContent = "Failed to load face model: " + err.message;
+      });
   </script>
 </body>
 </html>
