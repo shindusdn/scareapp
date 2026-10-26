@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Webcam Mirror</title>
+  <style>
+    :root { color-scheme: dark; }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 12px;
+      padding: 16px;
+      background: #111;
+      color: #eee;
+      font-family: system-ui, sans-serif;
+    }
+    canvas {
+      max-width: 100%;
+      max-height: 80vh;
+      background: #000;
+      border-radius: 8px;
+    }
+    #controls { display: flex; gap: 12px; align-items: center; }
+    button {
+      padding: 8px 16px;
+      font-size: 1rem;
+      border: 0;
+      border-radius: 6px;
+      background: #3b82f6;
+      color: #fff;
+      cursor: pointer;
+    }
+    #status { font-size: 0.9rem; opacity: 0.8; }
+  </style>
+</head>
+<body>
+  <canvas id="output"></canvas>
+
+  <div id="controls">
+    <button id="toggle">Start camera</button>
+    <span id="status">Press the button (or "q" to stop)</span>
+  </div>
+
+  <!-- Hidden source video; we draw it onto the canvas, mirrored -->
+  <video id="input" playsinline muted style="display:none"></video>
+
+  <script>
+    const video = document.getElementById("input");
+    const canvas = document.getElementById("output");
+    const ctx = canvas.getContext("2d");
+    const toggleBtn = document.getElementById("toggle");
+    const statusEl = document.getElementById("status");
+
+    let stream = null;
+    let rafId = null;
+
+    /**
+     * Called every frame AFTER the mirrored video has been drawn.
+     * This is where MediaPipe face landmarks will go later.
+     *
+     * Landmarks come back as normalized coords (0..1) from the UNmirrored video,
+     * so convert them with mirrorX() / toY() before drawing:
+     *   ctx.fillRect(mirrorX(lm.x), toY(lm.y), 3, 3);
+     */
+    function onFrame(video, ctx, timestampMs) {
+      // TODO: run MediaPipe FaceLandmarker here and draw results.
+    }
+
+    const mirrorX = (nx) => (1 - nx) * canvas.width;
+    const toY = (ny) => ny * canvas.height;
+
+    function render(now) {
+      // Draw the video flipped horizontally (mirror)
+      ctx.save();
+      ctx.translate(canvas.width, 0);
+      ctx.scale(-1, 1);
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+      ctx.restore();
+
+      onFrame(video, ctx, now);
+      rafId = requestAnimationFrame(render);
+    }
+
+    async function start() {
+      try {
+        statusEl.textContent = "Requesting camera...";
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: "user" },
+          audio: false,
+        });
+        video.srcObject = stream;
+        await video.play();
+
+        canvas.width = video.videoWidth;
+        canvas.height = video.videoHeight;
+
+        toggleBtn.textContent = "Stop camera";
+        statusEl.textContent = `Running ${canvas.width}x${canvas.height} (press "q" to stop)`;
+        rafId = requestAnimationFrame(render);
+      } catch (err) {
+        console.error(err);
+        statusEl.textContent = "Could not open camera: " + err.message;
+        stop();
+      }
+    }
+
+    function stop() {
+      if (rafId) cancelAnimationFrame(rafId);
+      rafId = null;
+      if (stream) stream.getTracks().forEach((t) => t.stop());
+      stream = null;
+      video.srcObject = null;
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      toggleBtn.textContent = "Start camera";
+      statusEl.textContent = 'Stopped. Press the button to start again.';
+    }
+
+    toggleBtn.addEventListener("click", () => (stream ? stop() : start()));
+    window.addEventListener("keydown", (e) => {
+      if (e.key.toLowerCase() === "q" && stream) stop();
+    });
+  </script>
+</body>
+</html>
